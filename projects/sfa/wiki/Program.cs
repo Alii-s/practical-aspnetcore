@@ -10,14 +10,15 @@ using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Primitives;
 using Scriban;
+using Microsoft.AspNetCore.Mvc;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using static HtmlBuilders.HtmlTags;
+using Microsoft.AspNetCore.Http;
 
-const string DisplayDateFormat = "MMMM dd, yyyy";
-const string HomePageName = "home-page";
-const string HtmlMime = "text/html";
-
+const string displayDateFormat = "MMMM dd, yyyy";
+const string homePageName = "home-page";
+const string htmlMime = "text/html";
 var builder = WebApplication.CreateBuilder();
 builder.Services
   .AddSingleton<Wiki>()
@@ -28,24 +29,28 @@ builder.Services
 builder.Logging.AddConsole().SetMinimumLevel(LogLevel.Warning);
 
 var app = builder.Build();
+app.UseAntiforgery();
 
 // Load home page
 app.MapGet("/", (Wiki wiki, Render render) =>
 {
-    Page? page = wiki.GetPage(HomePageName);
+    var page = wiki.GetPage(homePageName);
 
-    if (page is not object)
-        return Results.Redirect($"/{HomePageName}");
+    if (page == null)
+        return Results.Redirect($"/{homePageName}");
 
-    return Results.Text(render.BuildPage(HomePageName, atBody: () =>
-        new[]
+    return Results.Text(render.BuildPage(homePageName, atBody: () =>
         {
-          RenderPageContent(page),
-          RenderPageAttachments(page),
-          A.Href($"/edit?pageName={HomePageName}").Class("uk-button uk-button-default uk-button-small").Append("Edit").ToHtmlString()
+                return new[]
+                {
+                    RenderPageContent(page),
+                    RenderPageAttachments(page),
+                    A.Href($"/edit?pageName={homePageName}").Class("uk-button uk-button-default uk-button-small")
+                        .Append("Edit").ToHtmlString()
+                };
         },
         atSidePanel: () => AllPages(wiki)
-      ).ToString(), HtmlMime);
+      ).ToString(), htmlMime);
 });
 
 app.MapGet("/new-page", (string? pageName) =>
@@ -67,38 +72,38 @@ app.MapGet("/new-page", (string? pageName) =>
 // Edit a wiki page
 app.MapGet("/edit", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery) =>
 {
-    Page? page = wiki.GetPage(pageName);
-    if (page is not object)
+    var page = wiki.GetPage(pageName);
+    if (page == null)
         return Results.NotFound();
 
     return Results.Text(render.BuildEditorPage(pageName,
       atBody: () =>
         new[]
         {
-          BuildForm(new PageInput(page!.Id, pageName, page.Content, null), path: $"{pageName}", antiForgery: antiForgery.GetAndStoreTokens(context)),
-          RenderPageAttachmentsForEdit(page!, antiForgery.GetAndStoreTokens(context))
+          BuildForm(new PageInput(page.Id, pageName, page.Content, null), path: $"{pageName}", antiForgery: antiForgery.GetAndStoreTokens(context)),
+          RenderPageAttachmentsForEdit(page, antiForgery.GetAndStoreTokens(context))
         },
       atSidePanel: () =>
       {
           var list = new List<string>();
           // Do not show delete button on home page
-          if (!pageName!.ToString().Equals(HomePageName, StringComparison.Ordinal))
-              list.Add(RenderDeletePageButton(page!, antiForgery: antiForgery.GetAndStoreTokens(context)));
+          if (!pageName.Equals(homePageName, StringComparison.Ordinal))
+              list.Add(RenderDeletePageButton(page, antiForgery: antiForgery.GetAndStoreTokens(context)));
 
           list.Add(Br.ToHtmlString());
           list.AddRange(AllPagesForEditing(wiki));
           return list;
-      }).ToString(), HtmlMime);
+      }).ToString(), htmlMime);
 });
 
 // Deal with attachment download
 app.MapGet("/attachment", (string fileId, Wiki wiki) =>
 {
     var file = wiki.GetFile(fileId);
-    if (file is not object)
+    if (file != null)
       return Results.NotFound();
 
-    app!.Logger.LogInformation("Attachment " + file.Value.meta.Id + " - " + file.Value.meta.Filename);
+    app.Logger.LogInformation("Attachment " + file!.Value.meta.Id + " - " + file.Value.meta.Filename);
 
     return Results.File(file.Value.file, file.Value.meta.MimeType);
 });
@@ -106,22 +111,20 @@ app.MapGet("/attachment", (string fileId, Wiki wiki) =>
 // Load a wiki page
 app.MapGet("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery) =>
 {
-    pageName = pageName ?? "";
+    var page = wiki.GetPage(pageName);
 
-    Page? page = wiki.GetPage(pageName);
-
-    if (page is object)
+    if (page != null)
     {
         return Results.Text(render.BuildPage(pageName, atBody: () =>
           new[]
           {
             RenderPageContent(page),
             RenderPageAttachments(page),
-            Div.Class("last-modified").Append("Last modified: " + page!.LastModifiedUtc.ToString(DisplayDateFormat)).ToHtmlString(),
+            Div.Class("last-modified").Append("Last modified: " + page.LastModifiedUtc.ToString(displayDateFormat)).ToHtmlString(),
             A.Href($"/edit?pageName={pageName}").Append("Edit").ToHtmlString()
           },
           atSidePanel: () => AllPages(wiki)
-        ).ToString(), HtmlMime);
+        ).ToString(), htmlMime);
     }
     else
     {
@@ -131,25 +134,22 @@ app.MapGet("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Rend
           {
             BuildForm(new PageInput(null, pageName, string.Empty, null), path: pageName, antiForgery: antiForgery.GetAndStoreTokens(context))
           },
-        atSidePanel: () => AllPagesForEditing(wiki)).ToString(), HtmlMime);
+        atSidePanel: () => AllPagesForEditing(wiki)).ToString(), htmlMime);
     }
 });
 
 // Delete a page
-app.MapPost("/delete-page", async (HttpContext context, IAntiforgery antiForgery, Wiki wiki) =>
+app.MapPost("/delete-page", ([FromForm] string id ,HttpContext context, Wiki wiki) =>
 {
-    await antiForgery.ValidateRequestAsync(context);
-    var id = context.Request.Form["Id"];
-
     if (StringValues.IsNullOrEmpty(id))
     {
         app.Logger.LogWarning($"Unable to delete page because form Id is missing");
         return Results.Redirect("/");
     }
 
-    var (isOk, exception) = wiki.DeletePage(Convert.ToInt32(id), HomePageName);
+    var (isOk, exception) = wiki.DeletePage(Convert.ToInt32(id), homePageName);
 
-    if (!isOk && exception is object)
+    if (!isOk && exception != null)
         app.Logger.LogError(exception, $"Error in deleting page id {id}");
     else if (!isOk)
         app.Logger.LogError($"Unable to delete page id {id}");
@@ -157,34 +157,30 @@ app.MapPost("/delete-page", async (HttpContext context, IAntiforgery antiForgery
     return Results.Redirect("/");
 });
 
-app.MapPost("/delete-attachment", async (HttpContext context, IAntiforgery antiForgery, Wiki wiki)=>
+app.MapPost("/delete-attachment", ([FromForm] string id, [FromForm] string pageId , HttpContext context, Wiki wiki)=>
 {
-    await antiForgery.ValidateRequestAsync(context);
-    var id = context.Request.Form["Id"];
-
     if (StringValues.IsNullOrEmpty(id))
     {
         app.Logger.LogWarning($"Unable to delete attachment because form Id is missing");
         return Results.Redirect("/");
     }
 
-    var pageId = context.Request.Form["PageId"];
     if (StringValues.IsNullOrEmpty(pageId))
     {
         app.Logger.LogWarning($"Unable to delete attachment because form PageId is missing");
         return Results.Redirect("/");
     }
 
-    var (isOk, page, exception) = wiki.DeleteAttachment(Convert.ToInt32(pageId), id.ToString());
+    var (isOk, page, exception) = wiki.DeleteAttachment(Convert.ToInt32(pageId), id);
 
     if (!isOk)
     {
-        if (exception is object)
+        if (exception != null)
             app.Logger.LogError(exception, $"Error in deleting page attachment id {id}");
         else
             app.Logger.LogError($"Unable to delete page attachment id {id}");
 
-        if (page is object)
+        if (page != null)
             return Results.Redirect($"/{page.Name}");
         else
             return Results.Redirect("/");
@@ -194,15 +190,12 @@ app.MapPost("/delete-attachment", async (HttpContext context, IAntiforgery antiF
 });
 
 // Add or update a wiki page
-app.MapPost("/{pageName}", async (HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery)  =>
+app.MapPost("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery)  =>
 {
-    var pageName = context.Request.RouteValues["pageName"] as string ?? "";
-    await antiForgery.ValidateRequestAsync(context);
-
     PageInput input = PageInput.From(context.Request.Form);
 
     var modelState = new ModelStateDictionary();
-    var validator = new PageInputValidator(pageName, HomePageName);
+    var validator = new PageInputValidator(pageName, homePageName);
     validator.Validate(input).AddToModelState(modelState, null);
 
     if (!modelState.IsValid)
@@ -213,14 +206,14 @@ app.MapPost("/{pageName}", async (HttpContext context, Wiki wiki, Render render,
             {
               BuildForm(input, path: $"{pageName}", antiForgery: antiForgery.GetAndStoreTokens(context), modelState)
             },
-          atSidePanel: () => AllPages(wiki)).ToString(), HtmlMime);
+          atSidePanel: () => AllPages(wiki)).ToString(), htmlMime);
     }
 
     var (isOk, p, ex) = wiki.SavePage(input);
     if (!isOk)
     {
         app.Logger.LogError(ex, "Problem in saving page");
-        return Results.Problem("Progblem in saving page");
+        return Results.Problem("Problem in saving page");
     }
 
     return Results.Redirect($"/{p!.Name}");
@@ -307,7 +300,7 @@ static string RenderPageAttachmentsForEdit(Page page, AntiforgeryTokenSet antiFo
     static HtmlTag CreateDelete(int pageId, string attachmentId, AntiforgeryTokenSet antiForgery)
     {
         var antiForgeryField = Input.Hidden.Name(antiForgery.FormFieldName).Value(antiForgery.RequestToken!);
-        var id = Input.Hidden.Name("Id").Value(attachmentId.ToString());
+        var id = Input.Hidden.Name("Id").Value(attachmentId);
         var name = Input.Hidden.Name("PageId").Value(pageId.ToString());
 
         var submit = Button.Class("uk-button uk-button-danger uk-button-small").Append(Span.Attribute("uk-icon", "icon: close; ratio: .75;"));
@@ -351,7 +344,7 @@ static string RenderPageAttachments(Page page)
 // Build the wiki input form 
 static string BuildForm(PageInput input, string path, AntiforgeryTokenSet antiForgery, ModelStateDictionary? modelState = null)
 {
-    bool IsFieldOK(string key) => modelState!.ContainsKey(key) && modelState[key]!.ValidationState == ModelValidationState.Invalid;
+    bool IsFieldOk(string key) => modelState.ContainsKey(key) && modelState[key]!.ValidationState == ModelValidationState.Invalid;
 
     var antiForgeryField = Input.Hidden.Name(antiForgery.FormFieldName).Value(antiForgery.RequestToken!);
 
@@ -374,9 +367,9 @@ static string BuildForm(PageInput input, string path, AntiforgeryTokenSet antiFo
         .Append(Input.Text.Class("uk-input uk-form-width-large").Attribute("placeholder", "Click to select file").ToggleAttribute("disabled", true))
       );
 
-    if (modelState is object && !modelState.IsValid)
+    if (modelState != null && !modelState.IsValid)
     {
-        if (IsFieldOK("Name"))
+        if (IsFieldOk("Name"))
         {
             foreach (var er in modelState["Name"]!.Errors)
             {
@@ -384,7 +377,7 @@ static string BuildForm(PageInput input, string path, AntiforgeryTokenSet antiFo
             }
         }
 
-        if (IsFieldOK("Content"))
+        if (IsFieldOk("Content"))
         {
             foreach (var er in modelState["Content"]!.Errors)
             {
@@ -405,7 +398,7 @@ static string BuildForm(PageInput input, string path, AntiforgeryTokenSet antiFo
                  .Append(contentField)
                  .Append(attachmentField);
 
-    if (input.Id is object)
+    if (input.Id != null)
     {
         HtmlTag id = Input.Hidden.Name("Id").Value(input.Id.ToString()!);
         form = form.Append(id);
@@ -570,7 +563,7 @@ class Wiki
     {
         var pages = _cache.Get(AllPagesKey) as List<Page>;
 
-        if (pages is object)
+        if (pages != null)
             return pages;
 
         using var db = new LiteDatabase(GetDbPath());
@@ -602,10 +595,10 @@ class Wiki
             var coll = db.GetCollection<Page>(PageCollectionName);
             coll.EnsureIndex(x => x.Name);
 
-            Page? existingPage = input.Id.HasValue ? coll.FindOne(x => x.Id == input.Id) : null;
+            var existingPage = input.Id.HasValue ? coll.FindOne(x => x.Id == input.Id) : null;
 
             var sanitizer = new HtmlSanitizer();
-            var properName = input.Name.ToString().Trim().Replace(' ', '-').ToLower();
+            var properName = input.Name.Trim().Replace(' ', '-').ToLower();
 
             Attachment? attachment = null;
             if (!string.IsNullOrWhiteSpace(input.Attachment?.FileName))
@@ -619,10 +612,9 @@ class Wiki
                 );
 
                 using var stream = input.Attachment.OpenReadStream();
-                var res = db.FileStorage.Upload(attachment.FileId, input.Attachment.FileName, stream);
             }
 
-            if (existingPage is not object)
+            if (existingPage == null)
             {
                 var newPage = new Page
                 {
@@ -631,7 +623,7 @@ class Wiki
                     LastModifiedUtc = Timestamp()
                 };
 
-                if (attachment is object)
+                if (attachment != null)
                     newPage.Attachments.Add(attachment);
 
                 coll.Insert(newPage);
@@ -648,7 +640,7 @@ class Wiki
                     LastModifiedUtc = Timestamp()
                 };
 
-                if (attachment is object)
+                if (attachment != null)
                     updatedPage.Attachments.Add(attachment);
 
                 coll.Update(updatedPage);
@@ -671,7 +663,7 @@ class Wiki
             using var db = new LiteDatabase(GetDbPath());
             var coll = db.GetCollection<Page>(PageCollectionName);
             var page = coll.FindById(pageId);
-            if (page is not object)
+            if (page == null)
             {
                 _logger.LogWarning($"Delete attachment operation fails because page id {id} cannot be found in the database");
                 return (false, null, null);
@@ -710,7 +702,7 @@ class Wiki
 
             var page = coll.FindById(id);
 
-            if (page is not object)
+            if (page == null)
             {
                 _logger.LogWarning($"Delete operation fails because page id {id} cannot be found in the database");
                 return (false, null);
@@ -749,7 +741,7 @@ class Wiki
         using var db = new LiteDatabase(GetDbPath());
 
         var meta = db.FileStorage.FindById(fileId);
-        if (meta is not object)
+        if (meta == null)
             return null;
 
         using var stream = new MemoryStream();
@@ -786,7 +778,7 @@ record PageInput(int? Id, string Name, string Content, IFormFile? Attachment)
 {
     public static PageInput From(IFormCollection form)
     {
-        var (id, name, content) = (form["Id"], form["Name"], form["Content"]);
+        var (id, name, content) = (form["id"], form["Name"], form["Content"]);
 
         int? pageId = null;
 
