@@ -14,7 +14,8 @@ using Microsoft.AspNetCore.Mvc;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using static HtmlBuilders.HtmlTags;
-using Microsoft.AspNetCore.Http;
+using Htmx;
+using HtmlAgilityPack;
 
 const string displayDateFormat = "MMMM dd, yyyy";
 const string homePageName = "home-page";
@@ -32,25 +33,9 @@ var app = builder.Build();
 app.UseAntiforgery();
 
 // Load home page
-app.MapGet("/", (Wiki wiki, Render render) =>
+app.MapGet("/", (Wiki wiki, Render render, IAntiforgery antiforgery, HttpContext context) =>
 {
-    var page = wiki.GetPage(homePageName);
-
-    if (page == null)
-        return Results.Redirect($"/{homePageName}");
-
-    return Results.Text(render.BuildPage(homePageName, atBody: () =>
-        {
-                return new[]
-                {
-                    RenderPageContent(page),
-                    RenderPageAttachments(page),
-                    A.Href($"/edit?pageName={homePageName}").Class("uk-button uk-button-default uk-button-small")
-                        .Append("Edit").ToHtmlString()
-                };
-        },
-        atSidePanel: () => AllPages(wiki)
-      ).ToString(), htmlMime);
+    return Results.Content(GetRootHTML(homePageName, false,antiforgery,context), htmlMime);
 });
 
 app.MapGet("/new-page", (string? pageName) =>
@@ -109,32 +94,41 @@ app.MapGet("/attachment", (string fileId, Wiki wiki) =>
 });
 
 // Load a wiki page
-app.MapGet("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery) =>
+app.MapGet("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery, HttpRequest request) =>
 {
+    if (!request.IsHtmx())
+    {
+        return Results.Content(GetRootHTML(pageName, false, antiForgery, context), htmlMime);
+    }
     var page = wiki.GetPage(pageName);
 
     if (page != null)
     {
-        return Results.Text(render.BuildPage(pageName, atBody: () =>
-          new[]
-          {
-            RenderPageContent(page),
-            RenderPageAttachments(page),
-            Div.Class("last-modified").Append("Last modified: " + page.LastModifiedUtc.ToString(displayDateFormat)).ToHtmlString(),
-            A.Href($"/edit?pageName={pageName}").Append("Edit").ToHtmlString()
-          },
-          atSidePanel: () => AllPages(wiki)
-        ).ToString(), htmlMime);
+        return Results.Text(
+    H1.Append(KebabToNormalCase(page.Name)).ToHtmlString() +
+    RenderPageContent(page) +
+    RenderPageAttachments(page) +
+    Div.Class("last-modified")
+        .Append("Last modified: " + page.LastModifiedUtc.ToString(displayDateFormat))
+        .ToHtmlString() +
+    A.Attribute("hx-get", $"/edit?pageName={pageName}")
+        .Attribute("hx-target", "#main")
+        .Attribute("hx-push-url", "true")
+        .Append("Edit")
+        .ToHtmlString() +
+    AllPages(wiki) +
+    Title.Append(KebabToNormalCase(page.Name)).ToHtmlString()
+    , htmlMime);
     }
     else
     {
-        return Results.Text(render.BuildEditorPage(pageName,
-        atBody: () =>
-          new[]
-          {
-            BuildForm(new PageInput(null, pageName, string.Empty, null), path: pageName, antiForgery: antiForgery.GetAndStoreTokens(context))
-          },
-        atSidePanel: () => AllPagesForEditing(wiki)).ToString(), htmlMime);
+        return pageName.Equals(homePageName, StringComparison.OrdinalIgnoreCase)
+        ? Results.Redirect("/new-page?pageName=home-page")
+        : Results.NotFound($"Page {pageName} not found");
+    }
+    static string KebabToNormalCase(string txt)
+    {
+        return CultureInfo.CurrentCulture.TextInfo.ToTitleCase(txt.Replace('-', ' '));
     }
 });
 
@@ -190,7 +184,7 @@ app.MapPost("/delete-attachment", ([FromForm] string id, [FromForm] string pageI
 });
 
 // Add or update a wiki page
-app.MapPost("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery)  =>
+/*app.MapPost("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery)  =>
 {
     PageInput input = PageInput.From(context.Request.Form);
 
@@ -205,7 +199,7 @@ app.MapPost("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Ren
             new[]
             {
               BuildForm(input, path: $"{pageName}", antiForgery: antiForgery.GetAndStoreTokens(context), modelState)
-            },
+            }
           atSidePanel: () => AllPages(wiki)).ToString(), htmlMime);
     }
 
@@ -217,23 +211,24 @@ app.MapPost("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Ren
     }
 
     return Results.Redirect($"/{p!.Name}");
-});
+});*/
 
 await app.RunAsync();
 
 // End of the web part
 
-static string[] AllPages(Wiki wiki) => new[]
+static string AllPages(Wiki wiki)
 {
-  @"<span class=""uk-label"">Pages</span>",
-  @"<ul class=""uk-list"">",
-  string.Join("",
-    wiki.ListAllPages().OrderBy(x => x.Name)
-      .Select(x => Li.Append(A.Href(x.Name).Append(x.Name)).ToHtmlString()
-    )
-  ),
-  "</ul>"
-};
+    string html = $"""
+    <div id="side" class="uk-width-1-5" hx-swap-oob="innerHTML">
+        <span class="uk-label">Pages</span>
+        <ul class="uk-list">
+        {string.Join("", wiki.ListAllPages().OrderBy(x => x.Name).Select(x => $"""<li><a hx-get="/{x.Name}" hx-target="#main" hx-swap="innerHTML">{x.Name}</a></li>"""))}
+        </ul>
+    </div>
+    """;
+    return html;
+}
 
 static string[] AllPagesForEditing(Wiki wiki)
 {
@@ -409,6 +404,181 @@ static string BuildForm(PageInput input, string path, AntiforgeryTokenSet antiFo
     return form.ToHtmlString();
 }
 
+static string GetRootHTML(string pageName, bool loggedIn, IAntiforgery antiforgery, HttpContext context)
+{
+    string loggedHTML;
+    if (loggedIn)
+        loggedHTML = GetLoggedInHTML();
+    else
+        loggedHTML = GetLoggedOutHTML(antiforgery,context);
+
+    string html = $$"""
+                <!DOCTYPE html>
+
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>home-page</title>
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/css/uikit.min.css" />
+            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+                integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+            <script src="https://unpkg.com/htmx.org@1.9.12"
+                integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"
+                crossorigin="anonymous"></script>
+            <style>
+                .last-modified {font - size: small;
+                }
+
+                a:visited {color: blue;
+                }
+
+                a:link {color: red;
+                }
+                a .Owner{color: red;
+                }
+            </style>
+        </head>
+
+        <body>
+            <nav class="uk-navbar-container">
+                <div class="uk-container">
+                    <div class="uk-navbar">
+                        <div class="uk-navbar-left">
+                            <ul class="uk-navbar-nav">
+                                <li class="uk-active"><a hx-get="/home-page" hx-push-url="/" hx-target="#main"><span uk-icon="home"></span></a></li>
+                            </ul>
+                        </div>
+                        <div class="uk-navbar-center">
+                            <div class="uk-navbar-item">
+                                <form hx-get="/new-page" hx-target="#main">
+                                    <input class="uk-input uk-form-width-large" type="text" name="pageName"
+                                        placeholder="Type desired page title here"></input>
+                                    <input type="submit" class="uk-button uk-button-default" value="Add New Page">
+                                </form>
+                            </div>
+                        </div>
+                        <div class="uk-navbar-right">
+                            {{loggedHTML}}
+                        </div>
+                    </div>
+                </div>
+            </nav>
+
+            <div class="uk-container" hx-get="/{{pageName}}" hx-trigger="load" hx-target="#main">
+                <div uk-grid>
+                    <div class="uk-width-4-5" id="main">
+                    </div>
+                    <div class="uk-width-1-5" id="side">
+                    </div>
+                </div>
+            </div>
+
+
+            <script src="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/js/uikit.min.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/js/uikit-icons.min.js"></script>
+
+
+            <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+                integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+                crossorigin="anonymous"></script>
+            <!-- Visual Studio Browser Link -->
+            <script type="text/javascript" src="/_vs/browserLink" async="async" id="__browserLink_initializationData"
+                data-requestId="307ad795c6aa42c8b50edf0cbbeb62b5" data-requestMappingFromServer="false"
+                data-connectUrl="http://localhost:53665/4c1e7817f02a40ffb1b112f97f05a6b1/browserLink"></script>
+            <!-- End Browser Link -->
+            <script src="/_framework/aspnetcore-browser-refresh.js"></script>
+        </body>
+
+        </html>
+        """;
+    return html;
+}
+static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
+{
+    var token = antiforgery.GetAndStoreTokens(context);
+    string html = $"""
+                        <div id="loggedOut">
+                <button class="uk-button uk-button-primary" data-bs-toggle="modal"
+                    data-bs-target="#loginModal">Login</button>
+                <!-- The Modal -->
+                <div class="modal fade" id="loginModal">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content">
+                            <!-- Modal Header -->
+                            <div class="modal-header">
+                                <h4 class="modal-title">Please Login.</h4>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                                    aria-label="Close"></button>
+                            </div>
+                            <!-- Modal Body -->
+                            <div class="modal-body">
+                                <form class="uk-form" hx-post="/login">
+                                    <input name="{token.FormFieldName}" type="hidden" value="{token.RequestToken}" />
+                                    <div class="form-group">
+                                        <label for="username">Username:</label>
+                                        <input type="text" required minlength="4" class="form-control"
+                                            id="username" placeholder="Enter username" name="username">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="pwd">Password:</label>
+                                        <input type="password" required minlength="8" class="form-control"
+                                            id="pwd" placeholder="Enter password" name="pswd">
+                                    </div>
+                                    <button type="button" class="btn btn-primary mt-2">Login</button>
+                                </form>
+                            </div>
+                            <!-- Modal Footer -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Button to Open the Modal -->
+                <button class="uk-button uk-button-primary" data-bs-toggle="modal"
+                    data-bs-target="#registerModal">Register</button>
+                <!-- The Modal -->
+                <div class="modal fade" id="registerModal">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content">
+                            <!-- Modal Header -->
+                            <div class="modal-header">
+                                <h4 class="modal-title">Create a new account.</h4>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                                    aria-label="Close"></button>
+                            </div>
+                            <!-- Modal Body -->
+                            <div class="modal-body">
+                                <form class="uk-form" hx-post="/register">
+                                    <input name="{token.FormFieldName}" type="hidden" value="{token.RequestToken}" />
+                                    <div class="form-group">
+                                        <label for="username">Username:</label>
+                                        <input type="text" required minlength="4" class="form-control"
+                                            id="username" placeholder="Enter username" name="username">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="pwd">Password:</label>
+                                        <input type="password" required minlength="8" class="form-control"
+                                            id="pwd" placeholder="Enter password" name="pswd">
+                                    </div>
+                                    <button type="submit" class="btn btn-primary mt-2">Register</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """;
+    return html;
+}
+
+static string GetLoggedInHTML()
+{
+    string html = $"""
+                <div id="loggedIn">
+                    <button class="uk-button uk-button-primary" hx-post="/logout">Logout</button>
+                </div>
+                """;
+    return html;
+}
 class Render
 {
     static string KebabToNormalCase(string txt) => CultureInfo.CurrentCulture.TextInfo.ToTitleCase(txt.Replace('-', ' '));
@@ -735,6 +905,7 @@ class Wiki
         }
     }
 
+
     // Return null if file cannot be found.
     public (LiteFileInfo<string> meta, byte[] file)? GetFile(string fileId)
     {
@@ -749,7 +920,6 @@ class Wiki
         return (meta, stream.ToArray());
     }
 }
-
 record Page
 {
     public int Id { get; set; }
@@ -802,3 +972,5 @@ class PageInputValidator : AbstractValidator<PageInput>
         RuleFor(x => x.Content).NotEmpty().WithMessage("Content is required");
     }
 }
+
+
