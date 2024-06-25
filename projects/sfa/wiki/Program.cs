@@ -9,13 +9,17 @@ using Microsoft.AspNetCore.Html;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Primitives;
-using Scriban;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Mvc;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using static HtmlBuilders.HtmlTags;
 using Htmx;
-using HtmlAgilityPack;
+using Microsoft.Extensions.Options;
+using System.Security.Claims;
+using Scriban.Parsing;
+using Microsoft.AspNetCore.Mvc.RazorPages;
 
 const string displayDateFormat = "MMMM dd, yyyy";
 const string homePageName = "home-page";
@@ -23,9 +27,32 @@ const string htmlMime = "text/html";
 var builder = WebApplication.CreateBuilder();
 builder.Services
   .AddSingleton<Wiki>()
-  .AddSingleton<Render>()
   .AddAntiforgery()
-  .AddMemoryCache();
+  .AddMemoryCache()
+  .AddCors(options =>
+  {
+      options.AddDefaultPolicy(builder =>
+      {
+          builder.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader();
+      });
+  })
+  .AddSession(options =>
+  {
+      options.Cookie.HttpOnly = true;
+      options.Cookie.IsEssential = true;
+      options.Cookie.Name = "WikiSession";
+      options.IdleTimeout = TimeSpan.FromMinutes(20);
+  })
+  .AddDistributedMemoryCache()
+  .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
+  {
+      options.LoginPath = "/";
+      options.LogoutPath = "/";
+      options.AccessDeniedPath = "/";
+      options.Cookie.HttpOnly = true;
+      options.Cookie.IsEssential = true;
+      options.ExpireTimeSpan = TimeSpan.FromMinutes(20);
+  });
 
 builder.Logging.AddConsole().SetMinimumLevel(LogLevel.Warning);
 
@@ -33,59 +60,67 @@ var app = builder.Build();
 app.UseAntiforgery();
 
 // Load home page
-app.MapGet("/", (Wiki wiki, Render render, IAntiforgery antiforgery, HttpContext context) =>
+app.MapGet("/", (Wiki wiki, IAntiforgery antiforgery, HttpContext context) =>
 {
-    return Results.Content(GetRootHTML(homePageName, false,antiforgery,context), htmlMime);
+    return Results.Content(GetRootHTML(homePageName, isLoggedIn(context),antiforgery,context), htmlMime);
 });
 
-app.MapGet("/new-page", (string? pageName) =>
+app.MapGet("/new-page", (string? pageName, Wiki wiki, HttpContext context, IAntiforgery antiforgery) =>
 {
     if (string.IsNullOrEmpty(pageName))
         Results.Redirect("/");
 
+    var page = ToKebabCase(pageName!);
+    var wikiPage = wiki.GetPage(page);
+    if(wikiPage != null)
+        return Results.BadRequest("Page already exists");
+    string side = $"""
+    <div id="side" hx-swap-oob="innerHTML">
+        <br>
+        {AllPagesForEditing(wiki)}
+        </div>
+    """;
+    var formHtml = BuildForm(new PageInput(null, page, "", null), antiforgery.GetAndStoreTokens(context));
+    var titleHtml = Title.Append(page).ToHtmlString();
+    return Results.Text(formHtml + side + titleHtml, htmlMime);
     // Copied from https://www.30secondsofcode.org/c-sharp/s/to-kebab-case
     string ToKebabCase(string str)
     {
         Regex pattern = new Regex(@"[A-Z]{2,}(?=[A-Z][a-z]+[0-9]*|\b)|[A-Z]?[a-z]+[0-9]*|[A-Z]|[0-9]+");
         return string.Join("-", pattern.Matches(str)).ToLower();
     }
-
-    var page = ToKebabCase(pageName!);
-    return Results.Redirect($"/{page}");
 });
 
 // Edit a wiki page
-app.MapGet("/edit", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery) =>
+app.MapGet("/edit", (string pageName, HttpContext context, Wiki wiki, IAntiforgery antiForgery, HttpRequest request) =>
 {
+    if (!request.IsHtmx())
+    {
+        return Results.Content(GetRootHTML($"edit?pageName={pageName}", isLoggedIn(context), antiForgery, context),htmlMime);
+    }
     var page = wiki.GetPage(pageName);
     if (page == null)
         return Results.NotFound();
-
-    return Results.Text(render.BuildEditorPage(pageName,
-      atBody: () =>
-        new[]
-        {
-          BuildForm(new PageInput(page.Id, pageName, page.Content, null), path: $"{pageName}", antiForgery: antiForgery.GetAndStoreTokens(context)),
-          RenderPageAttachmentsForEdit(page, antiForgery.GetAndStoreTokens(context))
-        },
-      atSidePanel: () =>
-      {
-          var list = new List<string>();
-          // Do not show delete button on home page
-          if (!pageName.Equals(homePageName, StringComparison.Ordinal))
-              list.Add(RenderDeletePageButton(page, antiForgery: antiForgery.GetAndStoreTokens(context)));
-
-          list.Add(Br.ToHtmlString());
-          list.AddRange(AllPagesForEditing(wiki));
-          return list;
-      }).ToString(), htmlMime);
+    var deleteButton = "";
+    if(!pageName.Equals(homePageName, StringComparison.Ordinal))
+        deleteButton = RenderDeletePageButton(page, antiForgery.GetAndStoreTokens(context));
+    string side = $"""
+    {deleteButton}
+    <div id="side" hx-swap-oob="innerHTML">
+        <br>
+        {AllPagesForEditing(wiki)}
+        </div>
+    """;
+    var formHtml = BuildForm(new PageInput(page.Id, page.Name, page.Content, null), antiForgery.GetAndStoreTokens(context));
+    var attachments = RenderPageAttachmentsForEdit(page, antiForgery.GetAndStoreTokens(context));
+    return Results.Text(formHtml+ attachments + side, htmlMime);
 });
 
 // Deal with attachment download
 app.MapGet("/attachment", (string fileId, Wiki wiki) =>
 {
     var file = wiki.GetFile(fileId);
-    if (file != null)
+    if (file == null)
       return Results.NotFound();
 
     app.Logger.LogInformation("Attachment " + file!.Value.meta.Id + " - " + file.Value.meta.Filename);
@@ -94,14 +129,17 @@ app.MapGet("/attachment", (string fileId, Wiki wiki) =>
 });
 
 // Load a wiki page
-app.MapGet("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery, HttpRequest request) =>
+app.MapGet("/{pageName}", (string pageName, HttpContext context, Wiki wiki, IAntiforgery antiForgery, HttpRequest request) =>
 {
     if (!request.IsHtmx())
     {
-        return Results.Content(GetRootHTML(pageName, false, antiForgery, context), htmlMime);
+        return Results.Content(GetRootHTML(pageName, isLoggedIn(context), antiForgery, context), htmlMime);
     }
     var page = wiki.GetPage(pageName);
-
+    var editTag =isLoggedIn(context)? A.Attribute("hx-get", $"/edit?pageName={pageName}")
+        .Attribute("hx-target", "#main")
+        .Attribute("hx-push-url", "true")
+        .Append("Edit"):Div;
     if (page != null)
     {
         return Results.Text(
@@ -111,11 +149,8 @@ app.MapGet("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Rend
     Div.Class("last-modified")
         .Append("Last modified: " + page.LastModifiedUtc.ToString(displayDateFormat))
         .ToHtmlString() +
-    A.Attribute("hx-get", $"/edit?pageName={pageName}")
-        .Attribute("hx-target", "#main")
-        .Attribute("hx-push-url", "true")
-        .Append("Edit")
-        .ToHtmlString() +
+        Div.Id("editPage").ToHtmlString()+
+        editTag.ToHtmlString() +
     AllPages(wiki) +
     Title.Append(KebabToNormalCase(page.Name)).ToHtmlString()
     , htmlMime);
@@ -131,7 +166,63 @@ app.MapGet("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Rend
         return CultureInfo.CurrentCulture.TextInfo.ToTitleCase(txt.Replace('-', ' '));
     }
 });
+app.MapPost("/login", async(HttpContext context, [FromForm] string username, [FromForm] string password, IAntiforgery antiforgery, Wiki wiki) =>
+{
+    if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+    {
+        var text = $"""<div class="alert alert-danger" hx-swap-oob="innerHTML" id="error" role="alert">Please fill all fields</div>""";
+        return Results.Content(text,htmlMime);
+    }
 
+    var (isOk, user, ex) = wiki.AuthenticateUser(username, password);
+
+    if (isOk)
+    {
+        var claims = new List<Claim>
+        {
+            new Claim(ClaimTypes.Name, user!.Username)
+        };
+        var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+        var authProperties = new AuthenticationProperties
+        {
+            IsPersistent = true,
+            ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(20)
+        };
+        await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(claimsIdentity), authProperties);
+        return Results.Content(GetRootHTML(homePageName, isLoggedIn(context), antiforgery, context), htmlMime);
+    }
+    else
+    {
+        var token = antiforgery.GetAndStoreTokens(context);
+        return Results.BadRequest("Wrong Username or Password");
+    }
+});
+app.MapPost("/register", (HttpContext context, [FromForm] string username, [FromForm] string password, IAntiforgery antiforgery, Wiki wiki) =>
+{
+    if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+    {
+        var text = $"""<div class="alert alert-danger" role="alert">Please fill all fields</div>""";
+        return Results.Content(text,htmlMime);
+    }
+
+    var (isOk, ex) = wiki.RegisterUser(username, password);
+
+    if (isOk)
+    {
+        var text = $"""<div class="alert alert-success loginMessage" role="alert">Registeration Successful</div>""";
+        return Results.Content(text,htmlMime);
+    }
+    else
+    {
+        var text = $"""<div class="alert alert-danger loginMessage" role="alert">{ex?.Message ?? "An error occurred while registering the user."}</div>""";
+        return Results.Content(text,htmlMime);
+    }
+});
+app.MapPost("/logout", async(HttpContext context,IAntiforgery antiforgery) =>
+{
+    await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+    return Results.Content(GetRootHTML(homePageName, isLoggedIn(context), antiforgery, context), htmlMime);
+});
 // Delete a page
 app.MapPost("/delete-page", ([FromForm] string id ,HttpContext context, Wiki wiki) =>
 {
@@ -148,7 +239,7 @@ app.MapPost("/delete-page", ([FromForm] string id ,HttpContext context, Wiki wik
     else if (!isOk)
         app.Logger.LogError($"Unable to delete page id {id}");
 
-    return Results.Redirect("/");
+    return Results.Redirect($"/{homePageName}");
 });
 
 app.MapPost("/delete-attachment", ([FromForm] string id, [FromForm] string pageId , HttpContext context, Wiki wiki)=>
@@ -180,27 +271,25 @@ app.MapPost("/delete-attachment", ([FromForm] string id, [FromForm] string pageI
             return Results.Redirect("/");
     }
 
-    return Results.Redirect($"/{page!.Name}");
+    return Results.Redirect($"/edit?pageName={page!.Name}");
 });
 
 // Add or update a wiki page
-/*app.MapPost("/{pageName}", (string pageName, HttpContext context, Wiki wiki, Render render, IAntiforgery antiForgery)  =>
+app.MapPost("/add-page", ([FromForm] string Name, HttpContext context, Wiki wiki, IAntiforgery antiForgery) =>
 {
     PageInput input = PageInput.From(context.Request.Form);
 
     var modelState = new ModelStateDictionary();
-    var validator = new PageInputValidator(pageName, homePageName);
+    var validator = new PageInputValidator(Name, homePageName);
     validator.Validate(input).AddToModelState(modelState, null);
 
     if (!modelState.IsValid)
     {
-        return Results.Text(render.BuildEditorPage(pageName,
-          atBody: () =>
-            new[]
-            {
-              BuildForm(input, path: $"{pageName}", antiForgery: antiForgery.GetAndStoreTokens(context), modelState)
-            }
-          atSidePanel: () => AllPages(wiki)).ToString(), htmlMime);
+        string side = $"""
+        {AllPages(wiki)}
+        """;
+        string form = BuildForm(input, antiForgery.GetAndStoreTokens(context), modelState);
+        return Results.Text(form + side, htmlMime);
     }
 
     var (isOk, p, ex) = wiki.SavePage(input);
@@ -211,7 +300,7 @@ app.MapPost("/delete-attachment", ([FromForm] string id, [FromForm] string pageI
     }
 
     return Results.Redirect($"/{p!.Name}");
-});*/
+});
 
 await app.RunAsync();
 
@@ -229,27 +318,25 @@ static string AllPages(Wiki wiki)
     """;
     return html;
 }
-
-static string[] AllPagesForEditing(Wiki wiki)
+static string AllPagesForEditing(Wiki wiki)
 {
     static string KebabToNormalCase(string txt) => CultureInfo.CurrentCulture.TextInfo.ToTitleCase(txt.Replace('-', ' '));
 
-    return new[]
-    {
-      @"<span class=""uk-label"">Pages</span>",
-      @"<ul class=""uk-list"">",
-      string.Join("",
-        wiki.ListAllPages().OrderBy(x => x.Name)
-          .Select(x => Li.Append(Div.Class("uk-inline")
-              .Append(Span.Class("uk-form-icon").Attribute("uk-icon", "icon: copy"))
-              .Append(Input.Text.Value($"[{KebabToNormalCase(x.Name)}](/{x.Name})").Class("uk-input uk-form-small").Style("cursor", "pointer").Attribute("onclick", "copyMarkdownLink(this);"))
-          ).ToHtmlString()
-        )
-      ),
-      "</ul>"
-    };
+    string html = $"""
+        <span class="uk-label">Pages</span>
+        <ul class="uk-list">
+                {string.Join("",
+          wiki.ListAllPages().OrderBy(x => x.Name)
+            .Select(x => Li.Append(Div.Class("uk-inline")
+                .Append(Span.Class("uk-form-icon").Attribute("uk-icon", "icon: copy"))
+                .Append(Input.Text.Value($"[{KebabToNormalCase(x.Name)}](/{x.Name})").Class("uk-input uk-form-small").Style("cursor", "pointer").Attribute("onclick", "copyMarkdownLink(this);"))
+            ).ToHtmlString()
+          )
+        )}
+        </ul>
+        """;
+    return html;
 }
-
 static string RenderMarkdown(string str)
 {
     var sanitizer = new HtmlSanitizer();
@@ -265,9 +352,9 @@ static string RenderDeletePageButton(Page page, AntiforgeryTokenSet antiForgery)
     var submit = Div.Style("margin-top", "20px").Append(Button.Class("uk-button uk-button-danger").Append("Delete Page"));
 
     var form = Form
-               .Attribute("method", "post")
-               .Attribute("action", $"/delete-page")
-               .Attribute("onsubmit", $"return confirm('Please confirm to delete this page');")
+               .Attribute("hx-post", "/delete-page")
+               .Attribute("hx-target", "#main")
+               .Attribute("hx-confirm", "Confirm Deletion?")
                  .Append(antiForgeryField)
                  .Append(id)
                  .Append(submit);
@@ -301,9 +388,9 @@ static string RenderPageAttachmentsForEdit(Page page, AntiforgeryTokenSet antiFo
         var submit = Button.Class("uk-button uk-button-danger uk-button-small").Append(Span.Attribute("uk-icon", "icon: close; ratio: .75;"));
         var form = Form
                .Style("display", "inline")
-               .Attribute("method", "post")
-               .Attribute("action", $"/delete-attachment")
-               .Attribute("onsubmit", $"return confirm('Please confirm to delete this attachment');")
+               .Attribute("hx-post", "/delete-attachment")
+               .Attribute("hx-target", "#main")
+               .Attribute("hx-confirm", "Confirm attachment deletion?")
                  .Append(antiForgeryField)
                  .Append(id)
                  .Append(name)
@@ -337,7 +424,7 @@ static string RenderPageAttachments(Page page)
 }
 
 // Build the wiki input form 
-static string BuildForm(PageInput input, string path, AntiforgeryTokenSet antiForgery, ModelStateDictionary? modelState = null)
+static string BuildForm(PageInput input, AntiforgeryTokenSet antiForgery, ModelStateDictionary? modelState = null)
 {
     bool IsFieldOk(string key) => modelState.ContainsKey(key) && modelState[key]!.ValidationState == ModelValidationState.Invalid;
 
@@ -385,9 +472,9 @@ static string BuildForm(PageInput input, string path, AntiforgeryTokenSet antiFo
 
     var form = Form
                .Class("uk-form-stacked")
-               .Attribute("method", "post")
-               .Attribute("enctype", "multipart/form-data")
-               .Attribute("action", $"/{path}")
+               .Attribute("hx-post", $"/add-page")
+               .Attribute("hx-target", "#main")
+               .Attribute("hx-encoding", "multipart/form-data")
                  .Append(antiForgeryField)
                  .Append(nameField)
                  .Append(contentField)
@@ -407,11 +494,23 @@ static string BuildForm(PageInput input, string path, AntiforgeryTokenSet antiFo
 static string GetRootHTML(string pageName, bool loggedIn, IAntiforgery antiforgery, HttpContext context)
 {
     string loggedHTML;
+    string addPage = loggedIn ? """
+                            <div class="uk-navbar-item" hx-swap-oob="innerHTML" id="addPage">
+                                <form hx-get="/new-page" hx-target="#main">
+                                    <input class="uk-input uk-form-width-large" type="text" name="pageName"
+                                        placeholder="Type desired page title here"></input>
+                                    <input type="submit" class="uk-button uk-button-default" value="Add New Page">
+                                </form>
+                            </div>
+        """ : """<div class="uk-navbar-item" hx-swap-oob="innerHTML" id="addPage"></div>""";
     if (loggedIn)
+    {
         loggedHTML = GetLoggedInHTML();
+    }
     else
-        loggedHTML = GetLoggedOutHTML(antiforgery,context);
-
+    {
+        loggedHTML = GetLoggedOutHTML(antiforgery, context);
+    }
     string html = $$"""
                 <!DOCTYPE html>
 
@@ -422,23 +521,27 @@ static string GetRootHTML(string pageName, bool loggedIn, IAntiforgery antiforge
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/css/uikit.min.css" />
             <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
                 integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+            <link rel="stylesheet" href="https://unpkg.com/easymde/dist/easymde.min.css">
+            <script src="https://unpkg.com/easymde/dist/easymde.min.js"></script>
             <script src="https://unpkg.com/htmx.org@1.9.12"
                 integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"
                 crossorigin="anonymous"></script>
             <style>
-                .last-modified {font - size: small;
+                .last-modified {font-size: small;
                 }
 
                 a:visited {color: blue;
                 }
-
-                a:link {color: red;
+                a {
+                color: blue !important;
                 }
-                a .Owner{color: red;
+                a:hover {
+                text-decoration: underline !important;
+                }
+                #errorLog {color: red !important;
                 }
             </style>
         </head>
-
         <body>
             <nav class="uk-navbar-container">
                 <div class="uk-container">
@@ -448,16 +551,10 @@ static string GetRootHTML(string pageName, bool loggedIn, IAntiforgery antiforge
                                 <li class="uk-active"><a hx-get="/home-page" hx-push-url="/" hx-target="#main"><span uk-icon="home"></span></a></li>
                             </ul>
                         </div>
-                        <div class="uk-navbar-center">
-                            <div class="uk-navbar-item">
-                                <form hx-get="/new-page" hx-target="#main">
-                                    <input class="uk-input uk-form-width-large" type="text" name="pageName"
-                                        placeholder="Type desired page title here"></input>
-                                    <input type="submit" class="uk-button uk-button-default" value="Add New Page">
-                                </form>
-                            </div>
+                        <div class="uk-navbar-center" id="addPage">
+                            {{addPage}}
                         </div>
-                        <div class="uk-navbar-right">
+                        <div class="uk-navbar-right" id="logStatus">
                             {{loggedHTML}}
                         </div>
                     </div>
@@ -481,6 +578,30 @@ static string GetRootHTML(string pageName, bool loggedIn, IAntiforgery antiforge
             <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
                 integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
                 crossorigin="anonymous"></script>
+        <script>
+        var easyMDE;
+        document.addEventListener("htmx:afterRequest", function (event) {
+            if (event.detail.pathInfo.responsePath.includes("/new-page") || event.detail.pathInfo.responsePath.includes("/edit")) {
+                easyMDE = new EasyMDE({
+                    insertTexts: {
+                        link: ["[", "]()"]
+                    }
+                });
+            }
+            if(event.detail.pathInfo.responsePath.includes("/login") && event.detail.xhr.status === 400){
+                alert('Login failed: Wrong Username or Password');
+                console.log('Login failed: Wrong Username or Password');
+            }else if(event.detail.pathInfo.responsePath.includes("/login") || event.detail.pathInfo.responsePath.includes("/logout")){
+                window.location.href="/";
+                console.log('Login successful');
+            }
+        });
+
+        function copyMarkdownLink(element) {
+            element.select();
+            document.execCommand("copy");
+        }
+        </script>
             <!-- Visual Studio Browser Link -->
             <script type="text/javascript" src="/_vs/browserLink" async="async" id="__browserLink_initializationData"
                 data-requestId="307ad795c6aa42c8b50edf0cbbeb62b5" data-requestMappingFromServer="false"
@@ -497,7 +618,7 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
 {
     var token = antiforgery.GetAndStoreTokens(context);
     string html = $"""
-                        <div id="loggedOut">
+                        <div id="logStatus" hx-swap-oob="innerHTML">
                 <button class="uk-button uk-button-primary" data-bs-toggle="modal"
                     data-bs-target="#loginModal">Login</button>
                 <!-- The Modal -->
@@ -512,20 +633,21 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
                             </div>
                             <!-- Modal Body -->
                             <div class="modal-body">
-                                <form class="uk-form" hx-post="/login">
+                                <form class="uk-form" hx-post="/login" hx-target="#main">
                                     <input name="{token.FormFieldName}" type="hidden" value="{token.RequestToken}" />
                                     <div class="form-group">
                                         <label for="username">Username:</label>
                                         <input type="text" required minlength="4" class="form-control"
-                                            id="username" placeholder="Enter username" name="username">
+                                            id="usernameLogin" placeholder="Enter username" name="username">
                                     </div>
                                     <div class="form-group">
                                         <label for="pwd">Password:</label>
                                         <input type="password" required minlength="8" class="form-control"
-                                            id="pwd" placeholder="Enter password" name="pswd">
+                                            id="pwdLogin" placeholder="Enter password" name="password">
                                     </div>
-                                    <button type="button" class="btn btn-primary mt-2">Login</button>
+                                    <button type="submit" data-bs-dismiss="modal" class="btn btn-primary mt-2">Login</button>
                                 </form>
+                                <div id="errorLog"></div>
                             </div>
                             <!-- Modal Footer -->
                         </div>
@@ -547,19 +669,20 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
                             </div>
                             <!-- Modal Body -->
                             <div class="modal-body">
-                                <form class="uk-form" hx-post="/register">
+                                <form class="uk-form" hx-post="/register" hx-target=".error">
                                     <input name="{token.FormFieldName}" type="hidden" value="{token.RequestToken}" />
                                     <div class="form-group">
                                         <label for="username">Username:</label>
                                         <input type="text" required minlength="4" class="form-control"
-                                            id="username" placeholder="Enter username" name="username">
+                                            id="username" name="username" placeholder="Enter username" name="username">
                                     </div>
                                     <div class="form-group">
                                         <label for="pwd">Password:</label>
                                         <input type="password" required minlength="8" class="form-control"
-                                            id="pwd" placeholder="Enter password" name="pswd">
+                                            id="pwd" name="password" placeholder="Enter password" name="pswd">
                                     </div>
                                     <button type="submit" class="btn btn-primary mt-2">Register</button>
+                                    <div class="error"></div>
                                 </form>
                             </div>
                         </div>
@@ -573,144 +696,23 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
 static string GetLoggedInHTML()
 {
     string html = $"""
-                <div id="loggedIn">
-                    <button class="uk-button uk-button-primary" hx-post="/logout">Logout</button>
+                <div id="logStatus" hx-swap-oob="innerHTML">
+                    <button class="uk-button uk-button-primary" hx-post="/logout" hx-target="#main">Logout</button>
                 </div>
                 """;
     return html;
 }
-class Render
+
+static bool isLoggedIn(HttpContext context)
 {
-    static string KebabToNormalCase(string txt) => CultureInfo.CurrentCulture.TextInfo.ToTitleCase(txt.Replace('-', ' '));
-
-    static string[] MarkdownEditorHead() => new[]
-    {
-      @"<link rel=""stylesheet"" href=""https://unpkg.com/easymde/dist/easymde.min.css"">",
-      @"<script src=""https://unpkg.com/easymde/dist/easymde.min.js""></script>"
-    };
-
-    static string[] MarkdownEditorFoot() => new[]
-    {
-      @"<script>
-        var easyMDE = new EasyMDE({
-          insertTexts: {
-            link: [""["", ""]()""]
-          }
-        });
-
-        function copyMarkdownLink(element) {
-          element.select();
-          document.execCommand(""copy"");
-        }
-        </script>"
-    };
-
-    (Template head, Template body, Template layout) _templates = (
-      head: Scriban.Template.Parse(
-        """
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>{{ title }}</title>
-          <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/css/uikit.min.css" />
-          {{ header }}
-          <style>
-            .last-modified { font-size: small; }
-            a:visited { color: blue; }
-            a:link { color: red; }
-          </style>
-          """),
-      body: Scriban.Template.Parse("""
-                <nav class="uk-navbar-container">
-                  <div class="uk-container">
-                    <div class="uk-navbar">
-                      <div class="uk-navbar-left">
-                        <ul class="uk-navbar-nav">
-                          <li class="uk-active"><a href="/"><span uk-icon="home"></span></a></li>
-                        </ul>
-                      </div>
-                      <div class="uk-navbar-center">
-                        <div class="uk-navbar-item">
-                          <form action="/new-page">
-                            <input class="uk-input uk-form-width-large" type="text" name="pageName" placeholder="Type desired page title here"></input>
-                            <input type="submit"  class="uk-button uk-button-default" value="Add New Page">
-                          </form>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </nav>
-                {{ if at_side_panel != "" }}
-                  <div class="uk-container">
-                  <div uk-grid>
-                    <div class="uk-width-4-5">
-                      <h1>{{ page_name }}</h1>
-                      {{ content }}
-                    </div>
-                    <div class="uk-width-1-5">
-                      {{ at_side_panel }}
-                    </div>
-                  </div>
-                  </div>
-                {{ else }}
-                  <div class="uk-container">
-                    <h1>{{ page_name }}</h1>
-                    {{ content }}
-                  </div>
-                {{ end }}
-                      
-                <script src="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/js/uikit.min.js"></script>
-                <script src="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/js/uikit-icons.min.js"></script>
-                {{ at_foot }}
-                
-          """),
-      layout: Scriban.Template.Parse("""
-                <!DOCTYPE html>
-                  <head>
-                    {{ head }}
-                  </head>
-                  <body>
-                    {{ body }}
-                  </body>
-                </html>
-          """)
-    );
-
-    // Use only when the page requires editor
-    public HtmlString BuildEditorPage(string title, Func<IEnumerable<string>> atBody, Func<IEnumerable<string>>? atSidePanel = null) =>
-      BuildPage(
-        title,
-        atHead: () => MarkdownEditorHead(),
-        atBody: atBody,
-        atSidePanel: atSidePanel,
-        atFoot: () => MarkdownEditorFoot()
-        );
-
-    // General page layout building function
-    public HtmlString BuildPage(string title, Func<IEnumerable<string>>? atHead = null, Func<IEnumerable<string>>? atBody = null, Func<IEnumerable<string>>? atSidePanel = null, Func<IEnumerable<string>>? atFoot = null)
-    {
-        var head = _templates.head.Render(new
-        {
-            title,
-            header = string.Join("\r", atHead?.Invoke() ?? new[] { "" })
-        });
-
-        var body = _templates.body.Render(new
-        {
-            PageName = KebabToNormalCase(title),
-            Content = string.Join("\r", atBody?.Invoke() ?? new[] { "" }),
-            AtSidePanel = string.Join("\r", atSidePanel?.Invoke() ?? new[] { "" }),
-            AtFoot = string.Join("\r", atFoot?.Invoke() ?? new[] { "" })
-        });
-
-        return new HtmlString(_templates.layout.Render(new { head, body }));
-    }
+    return context.User.Identity?.IsAuthenticated ?? false;
 }
-
 class Wiki
 {
     DateTime Timestamp() => DateTime.UtcNow;
 
     const string PageCollectionName = "Pages";
+    const string UserCollectionName = "Users";
     const string AllPagesKey = "AllPages";
     const double CacheAllPagesForMinutes = 30;
 
@@ -739,6 +741,9 @@ class Wiki
         using var db = new LiteDatabase(GetDbPath());
         var coll = db.GetCollection<Page>(PageCollectionName);
         var items = coll.Query().ToList();
+        var userColl = db.GetCollection<User>(UserCollectionName);
+        userColl.EnsureIndex(x => x.Username);
+
 
         _cache.Set(AllPagesKey, items, new MemoryCacheEntryOptions().SetAbsoluteExpiration(TimeSpan.FromMinutes(CacheAllPagesForMinutes)));
         return items;
@@ -782,6 +787,7 @@ class Wiki
                 );
 
                 using var stream = input.Attachment.OpenReadStream();
+                _ = db.FileStorage.Upload(attachment.FileId, input.Attachment.FileName, stream);
             }
 
             if (existingPage == null)
@@ -905,14 +911,70 @@ class Wiki
         }
     }
 
+    public (bool isOk, Exception? ex) RegisterUser(string username, string password)
+    {
+        try
+        {
+            using var db = new LiteDatabase(GetDbPath());
+            var coll = db.GetCollection<User>(UserCollectionName);
+            coll.EnsureIndex(x => x.Username);
 
+            if (coll.Exists(x => x.Username == username))
+            {
+                return (false, new Exception("Username already exists"));
+            }
+
+            var passwordHash = BCrypt.Net.BCrypt.HashPassword(password);
+
+            var newUser = new User
+            {
+                Username = username,
+                PasswordHash = passwordHash,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            coll.Insert(newUser);
+
+            return (true, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"There is an exception in trying to register user '{username}'");
+            return (false, ex);
+        }
+    }
+
+    // Authenticate a user
+    public (bool isOk, User? user, Exception? ex) AuthenticateUser(string username, string password)
+    {
+        try
+        {
+            using var db = new LiteDatabase(GetDbPath());
+            var coll = db.GetCollection<User>(UserCollectionName);
+            coll.EnsureIndex(x => x.Username);
+
+            var user = coll.FindOne(x => x.Username == username);
+
+            if (user == null || !BCrypt.Net.BCrypt.Verify(password, user.PasswordHash))
+            {
+                return (false, null, new Exception("Invalid username or password"));
+            }
+
+            return (true, user, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"There is an exception in trying to authenticate user '{username}'");
+            return (false, null, ex);
+        }
+    }
     // Return null if file cannot be found.
     public (LiteFileInfo<string> meta, byte[] file)? GetFile(string fileId)
     {
         using var db = new LiteDatabase(GetDbPath());
 
         var meta = db.FileStorage.FindById(fileId);
-        if (meta == null)
+        if (meta is null)
             return null;
 
         using var stream = new MemoryStream();
@@ -959,6 +1021,14 @@ record PageInput(int? Id, string Name, string Content, IFormFile? Attachment)
 
         return new PageInput(pageId, name!, content!, file);
     }
+}
+
+record User
+{
+    public int Id { get; set; }
+    public string Username { get; set; } = string.Empty;
+    public string PasswordHash { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
 class PageInputValidator : AbstractValidator<PageInput>
