@@ -637,15 +637,15 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
                                     <input name="{token.FormFieldName}" type="hidden" value="{token.RequestToken}" />
                                     <div class="form-group">
                                         <label for="username">Username:</label>
-                                        <input type="text" required minlength="4" class="form-control"
+                                        <input type="text" required minlength="4" class="form-control mt-2"
                                             id="usernameLogin" placeholder="Enter username" name="username">
                                     </div>
                                     <div class="form-group">
-                                        <label for="pwd">Password:</label>
-                                        <input type="password" required minlength="8" class="form-control"
+                                        <label for="pwd" class="mt-2">Password:</label>
+                                        <input type="password" required minlength="8" class="form-control mt-2"
                                             id="pwdLogin" placeholder="Enter password" name="password">
                                     </div>
-                                    <button type="submit" data-bs-dismiss="modal" class="btn btn-primary mt-2">Login</button>
+                                    <button type="submit" class="btn btn-primary mt-3">Login</button>
                                 </form>
                                 <div id="errorLog"></div>
                             </div>
@@ -673,15 +673,15 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
                                     <input name="{token.FormFieldName}" type="hidden" value="{token.RequestToken}" />
                                     <div class="form-group">
                                         <label for="username">Username:</label>
-                                        <input type="text" required minlength="4" class="form-control"
+                                        <input type="text" required minlength="4" class="form-control mt-2"
                                             id="username" name="username" placeholder="Enter username" name="username">
                                     </div>
                                     <div class="form-group">
-                                        <label for="pwd">Password:</label>
-                                        <input type="password" required minlength="8" class="form-control"
+                                        <label for="pwd" class="mt-2">Password:</label>
+                                        <input type="password" required minlength="8" class="form-control mt-2"
                                             id="pwd" name="password" placeholder="Enter password" name="pswd">
                                     </div>
-                                    <button type="submit" class="btn btn-primary mt-2">Register</button>
+                                    <button type="submit" class="btn btn-primary mt-3">Register</button>
                                     <div class="error"></div>
                                 </form>
                             </div>
