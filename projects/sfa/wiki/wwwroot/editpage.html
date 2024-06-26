@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>home-page</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/css/uikit.min.css" />
+    <link rel="stylesheet" href="https://unpkg.com/easymde/dist/easymde.min.css">
+    <script src="https://unpkg.com/easymde/dist/easymde.min.js"></script>
+    <style>
+        .last-modified {
+            font-size: small;
+        }
+
+        a:visited {
+            color: blue;
+        }
+
+        a:link {
+            color: red;
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="uk-navbar-container">
+        <div class="uk-container">
+            <div class="uk-navbar">
+                <div class="uk-navbar-left">
+                    <ul class="uk-navbar-nav">
+                        <li class="uk-active"><a href="/"><span uk-icon="home"></span></a></li>
+                    </ul>
+                </div>
+                <div class="uk-navbar-center">
+                    <div class="uk-navbar-item">
+                        <form action="/new-page">
+                            <input class="uk-input uk-form-width-large" type="text" name="pageName"
+                                placeholder="Type desired page title here"></input>
+                            <input type="submit" class="uk-button uk-button-default" value="Add New Page">
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="uk-container">
+        <div uk-grid>
+            <div class="uk-width-4-5">
+                <h1>Home Page</h1>
+                <form action="/home-page" class="uk-form-stacked" enctype="multipart/form-data" method="post"><input
+                        name="__RequestVerificationToken" type="hidden"
+                        value="CfDJ8AMDUSaNtx9CkPPN7g4rlGjrK226eA7GMrLxOdTw8fwwoYDDq1EqLruap-seo5BTF192bxB8gtOpXR4BW1Fivc920NkTni1HDrBYG6JI7wB9VyfF7CrWbCuYxNDACKbI4tRCexTfwUfQH_5lIEfcgoo" />
+                    <div><label class="uk-form-label">Name</label>
+                        <div class="uk-form-controls"><input class="uk-input" name="Name" type="text"
+                                value="home-page" /></div>
+                    </div>
+                    <div><label class="uk-form-label">Content</label>
+                        <div class="uk-form-controls"><textarea class="uk-textarea" name="Content">XX</textarea></div>
+                    </div>
+                    <div><label class="uk-form-label">Attachment</label>
+                        <div uk-form-custom="target: true"><input name="Attachment" type="file" /><input
+                                class="uk-input uk-form-width-large" disabled="disabled"
+                                placeholder="Click to select file" type="text" /></div>
+                    </div><input name="Id" type="hidden" value="1" />
+                    <div style="margin-top:20px;"><button class="uk-button uk-button-primary">Submit</button></div>
+                </form>
+
+            </div>
+            <div class="uk-width-1-5">
+                <br />
+                <span class="uk-label">Pages</span>
+                <ul class="uk-list">
+                    <li>
+                        <div class="uk-inline"><span class="uk-form-icon" uk-icon="icon: copy"></span><input
+                                class="uk-input uk-form-small" onclick="copyMarkdownLink(this);" style="cursor:pointer;"
+                                type="text" value="[Home Page](/home-page)" /></div>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+
+    <script src="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/js/uikit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/js/uikit-icons.min.js"></script>
+    <script>
+        var easyMDE = new EasyMDE({
+            insertTexts: {
+                link: ["[", "]()"]
+            }
+        });
+
+        function copyMarkdownLink(element) {
+            element.select();
+            document.execCommand("copy");
+        }
+    </script>
+
+
+    <!-- Visual Studio Browser Link -->
+    <script type="text/javascript" src="/_vs/browserLink" async="async" id="__browserLink_initializationData"
+        data-requestId="0ec3d811a35a4cc0beada22a85c8f222" data-requestMappingFromServer="false"
+        data-connectUrl="http://localhost:53665/4c1e7817f02a40ffb1b112f97f05a6b1/browserLink"></script>
+    <!-- End Browser Link -->
+    <script src="/_framework/aspnetcore-browser-refresh.js"></script>
+</body>
+
+</html>
