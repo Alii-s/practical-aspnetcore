@@ -645,7 +645,7 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
                                         <input type="password" required minlength="8" class="form-control"
                                             id="pwdLogin" placeholder="Enter password" name="password">
                                     </div>
-                                    <button type="submit" data-bs-dismiss="modal" class="btn btn-primary mt-2">Login</button>
+                                    <button type="submit" class="btn btn-primary mt-2">Login</button>
                                 </form>
                                 <div id="errorLog"></div>
                             </div>
