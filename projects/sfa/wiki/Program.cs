@@ -37,18 +37,11 @@ builder.Services
           builder.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader();
       });
   })
-  .AddSession(options =>
-  {
-      options.Cookie.HttpOnly = true;
-      options.Cookie.IsEssential = true;
-      options.Cookie.Name = "WikiSession";
-      options.IdleTimeout = TimeSpan.FromMinutes(20);
-  })
   .AddDistributedMemoryCache()
   .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
   {
-      options.LoginPath = "/";
-      options.LogoutPath = "/";
+      options.LoginPath = "/login";
+      options.LogoutPath = "/logout";
       options.AccessDeniedPath = "/";
       options.Cookie.HttpOnly = true;
       options.Cookie.IsEssential = true;
@@ -63,11 +56,14 @@ app.UseAntiforgery();
 // Load home page
 app.MapGet("/", (Wiki wiki, IAntiforgery antiforgery, HttpContext context) =>
 {
+    var loggedIn = isLoggedIn(context);
     return Results.Content(GetRootHTML(homePageName, isLoggedIn(context),antiforgery,context), htmlMime);
 });
 
 app.MapGet("/new-page", (string? pageName, Wiki wiki, HttpContext context, IAntiforgery antiforgery) =>
 {
+    if (isLoggedIn(context) == false)
+        return Results.BadRequest("Eror400: Please Login to use this feature");
     if (string.IsNullOrEmpty(pageName))
         Results.Redirect("/");
 
@@ -95,6 +91,8 @@ app.MapGet("/new-page", (string? pageName, Wiki wiki, HttpContext context, IAnti
 // Edit a wiki page
 app.MapGet("/edit", (string pageName, HttpContext context, Wiki wiki, IAntiforgery antiForgery, HttpRequest request) =>
 {
+    if (isLoggedIn(context) == false)
+        return Results.BadRequest("Eror400: Please Login to use this feature");
     if (!request.IsHtmx())
     {
         return Results.Content(GetRootHTML($"edit?pageName={pageName}", isLoggedIn(context), antiForgery, context),htmlMime);
@@ -188,8 +186,7 @@ app.MapPost("/login", async(HttpContext context, [FromForm] string username, [Fr
         var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
         var authProperties = new AuthenticationProperties
         {
-            IsPersistent = true,
-            ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(20)
+            IsPersistent = true
         };
         await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(claimsIdentity), authProperties);
         return Results.Content(GetRootHTML(homePageName, isLoggedIn(context), antiforgery, context), htmlMime);
