@@ -20,6 +20,7 @@ using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using Scriban.Parsing;
 using Microsoft.AspNetCore.Mvc.RazorPages;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 const string displayDateFormat = "MMMM dd, yyyy";
 const string homePageName = "home-page";
@@ -124,8 +125,10 @@ app.MapGet("/attachment", (string fileId, Wiki wiki) =>
       return Results.NotFound();
 
     app.Logger.LogInformation("Attachment " + file!.Value.meta.Id + " - " + file.Value.meta.Filename);
-
-    return Results.File(file.Value.file, file.Value.meta.MimeType);
+    var base64 = Convert.ToBase64String(file.Value.file);
+    var mimeType = file.Value.meta.MimeType;
+    var html = $"<img src='data:{mimeType};base64,{base64}' alt='{file.Value.meta.Filename}' />";
+    return Results.Text(html, "text/html");
 });
 
 // Load a wiki page
@@ -418,7 +421,9 @@ static string RenderPageAttachments(Page page)
     var list = Ul.Class("uk-list uk-list-disc");
     foreach (var attachment in page.Attachments)
     {
-        list = list.Append(Li.Append(A.Href($"/attachment?fileId={attachment.FileId}").Append(attachment.FileName)));
+        list = list.Append(Li.Append(A.Attribute("hx-get",$"/attachment?fileId={attachment.FileId}").Attribute("hx-target","#imageModalBody").Attribute("data-bs-toggle","modal")
+            .Attribute("data-bs-target","#imageModal")
+            .Append(attachment.FileName)));
     }
     return label.ToHtmlString() + list.ToHtmlString();
 }
@@ -569,7 +574,17 @@ static string GetRootHTML(string pageName, bool loggedIn, IAntiforgery antiforge
                     </div>
                 </div>
             </div>
-
+        <div class="modal fade" id="imageModal" tabindex="-1" aria-labelledby="imageModalLabel" aria-hidden="true">
+          <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+              <div class="modal-header">
+                  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+              </div>
+              <div class="modal-body" id="imageModalBody">
+              </div>
+            </div>
+          </div>
+        </div>
 
             <script src="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/js/uikit.min.js"></script>
             <script src="https://cdn.jsdelivr.net/npm/uikit@3.19.4/dist/js/uikit-icons.min.js"></script>
