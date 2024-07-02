@@ -116,7 +116,7 @@ app.MapGet("/edit", (string pageName, HttpContext context, Wiki wiki, IAntiforge
 });
 
 // Deal with attachment download
-app.MapGet("/attachment", (string fileId, Wiki wiki) =>
+app.MapGet("/attachment-tag", (string fileId, Wiki wiki) =>
 {
     var file = wiki.GetFile(fileId);
     if (file == null)
@@ -129,6 +129,15 @@ app.MapGet("/attachment", (string fileId, Wiki wiki) =>
     return Results.Text(html, "text/html");
 });
 
+app.MapGet("/attachment", (string fileId, Wiki wiki) =>
+{
+    var file = wiki.GetFile(fileId);
+    if (file == null)
+        return Results.NotFound();
+
+    app.Logger.LogInformation("Attachment " + file!.Value.meta.Id + " - " + file.Value.meta.Filename);
+    return Results.File(file.Value.file, file.Value.meta.MimeType);
+});
 // Load a wiki page
 app.MapGet("/{pageName}", (string pageName, HttpContext context, Wiki wiki, IAntiforgery antiForgery, HttpRequest request) =>
 {
@@ -171,8 +180,8 @@ app.MapPost("/login", async(HttpContext context, [FromForm] string username, [Fr
 {
     if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
     {
-        var text = $"""<div class="alert alert-danger" hx-swap-oob="innerHTML" id="error" role="alert">Please fill all fields</div>""";
-        return Results.Content(text,htmlMime);
+        var text = $"""<div class="alert alert-danger" role="alert">Please fill all fields</div>""";
+        return Results.Content(text, htmlMime);
     }
 
     var (isOk, user, ex) = wiki.AuthenticateUser(username, password);
@@ -189,12 +198,14 @@ app.MapPost("/login", async(HttpContext context, [FromForm] string username, [Fr
             IsPersistent = true
         };
         await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(claimsIdentity), authProperties);
-        return Results.Content(GetRootHTML(homePageName, isLoggedIn(context), antiforgery, context), htmlMime);
+        var text = $"""<div class="alert alert-success" role="alert">Login Successful</div>""";
+        return Results.Content(text, htmlMime);
     }
     else
     {
         var token = antiforgery.GetAndStoreTokens(context);
-        return Results.BadRequest("Wrong Username or Password");
+        var text = $"""<div class="alert alert-danger" role="alert">Wrong Email or Password</div>""";
+        return Results.Content(text, htmlMime);
     }
 });
 app.MapPost("/register", (HttpContext context, [FromForm] string username, [FromForm] string password, IAntiforgery antiforgery, Wiki wiki) =>
@@ -209,7 +220,7 @@ app.MapPost("/register", (HttpContext context, [FromForm] string username, [From
 
     if (isOk)
     {
-        var text = $"""<div class="alert alert-success loginMessage" role="alert">Registeration Successful</div>""";
+        var text = $"""<div class="alert alert-success loginMessage" role="alert">Registration Successful</div>""";
         return Results.Content(text,htmlMime);
     }
     else
@@ -418,7 +429,7 @@ static string RenderPageAttachments(Page page)
     var list = Ul.Class("uk-list uk-list-disc");
     foreach (var attachment in page.Attachments)
     {
-        list = list.Append(Li.Append(A.Attribute("hx-get",$"/attachment?fileId={attachment.FileId}").Attribute("hx-target","#imageModalBody").Attribute("data-bs-toggle","modal")
+        list = list.Append(Li.Append(A.Attribute("hx-get",$"/attachment-tag?fileId={attachment.FileId}").Attribute("hx-target","#imageModalBody").Attribute("data-bs-toggle","modal")
             .Attribute("data-bs-target","#imageModal")
             .Append(attachment.FileName)));
     }
@@ -540,7 +551,9 @@ static string GetRootHTML(string pageName, bool loggedIn, IAntiforgery antiforge
                 a:hover {
                 text-decoration: underline !important;
                 }
-                #errorLog {color: red !important;
+                .alert-danger {color: red !important;
+                }
+                .alert-success {color: green !important;
                 }
             </style>
         </head>
@@ -593,22 +606,29 @@ static string GetRootHTML(string pageName, bool loggedIn, IAntiforgery antiforge
         <script>
         var easyMDE;
         document.addEventListener("htmx:afterRequest", function (event) {
-            if (event.detail.pathInfo.responsePath.includes("/new-page") || event.detail.pathInfo.responsePath.includes("/edit")) {
+            if ((event.detail.pathInfo.responsePath.includes("/new-page") || event.detail.pathInfo.responsePath.includes("/edit")) && easyMDE==null) {
                 easyMDE = new EasyMDE({
                     insertTexts: {
                         link: ["[", "]()"]
                     }
                 });
             }
-            if(event.detail.pathInfo.responsePath.includes("/login") && event.detail.xhr.status === 400){
-                alert('Login failed: Wrong Username or Password');
-                console.log('Login failed: Wrong Username or Password');
-            }else if(event.detail.pathInfo.responsePath.includes("/login") || event.detail.pathInfo.responsePath.includes("/logout")){
+            if((event.detail.pathInfo.responsePath.includes("/login") && document.querySelector('#errorLog').innerHTML.includes("Login Successful"))|| event.detail.pathInfo.responsePath.includes("/logout")){
+                console.log("Login successful");
+                htmx.ajax('GET', '/', { target: '#main' });
                 window.location.href="/";
-                console.log('Login successful');
+            }
+            if((event.detail.pathInfo.responsePath.includes("/register") && document.querySelector('.error').innerHTML.includes("Registration Successful"))){
+                console.log("Registration successful");
+                sleep(1000).then(() => {
+                    document.querySelector('#registerClose').click();
+                    document.querySelector('#loginBtn').click();
+                    });
             }
         });
-
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
         function copyMarkdownLink(element) {
             element.select();
             document.execCommand("copy");
@@ -632,7 +652,7 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
     string html = $"""
                         <div id="logStatus" hx-swap-oob="innerHTML">
                 <button class="uk-button uk-button-primary" data-bs-toggle="modal"
-                    data-bs-target="#loginModal">Login</button>
+                    data-bs-target="#loginModal" id="loginBtn">Login</button>
                 <!-- The Modal -->
                 <div class="modal fade" id="loginModal">
                     <div class="modal-dialog modal-dialog-centered">
@@ -640,12 +660,12 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
                             <!-- Modal Header -->
                             <div class="modal-header">
                                 <h4 class="modal-title">Please Login.</h4>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                                <button type="button" id="loginClose" class="btn-close" data-bs-dismiss="modal"
                                     aria-label="Close"></button>
                             </div>
                             <!-- Modal Body -->
                             <div class="modal-body">
-                                <form class="uk-form" hx-post="/login" hx-target="#main">
+                                <form class="uk-form" hx-post="/login" hx-target="#errorLog">
                                     <input name="{token.FormFieldName}" type="hidden" value="{token.RequestToken}" />
                                     <div class="form-group">
                                         <label for="username">Username:</label>
@@ -676,7 +696,7 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
                             <!-- Modal Header -->
                             <div class="modal-header">
                                 <h4 class="modal-title">Create a new account.</h4>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                                <button type="button" id="registerClose" class="btn-close" data-bs-dismiss="modal"
                                     aria-label="Close"></button>
                             </div>
                             <!-- Modal Body -->
