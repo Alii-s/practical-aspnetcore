@@ -180,7 +180,7 @@ app.MapPost("/login", async(HttpContext context, [FromForm] string username, [Fr
 {
     if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
     {
-        var text = $"""<div class="alert alert-danger" role="alert">Please fill all fields</div>""";
+        var text = $"""<div class="alert alert-danger mt-2" role="alert">Please fill all fields</div>""";
         return Results.Content(text, htmlMime);
     }
 
@@ -198,13 +198,13 @@ app.MapPost("/login", async(HttpContext context, [FromForm] string username, [Fr
             IsPersistent = true
         };
         await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(claimsIdentity), authProperties);
-        var text = $"""<div class="alert alert-success" role="alert">Login Successful</div>""";
+        var text = $"""<div class="alert alert-success mt-2" role="alert">Login Successful</div>""";
         return Results.Content(text, htmlMime);
     }
     else
     {
         var token = antiforgery.GetAndStoreTokens(context);
-        var text = $"""<div class="alert alert-danger" role="alert">Wrong Email or Password</div>""";
+        var text = $"""<div class="alert alert-danger mt-2" role="alert">Wrong Email or Password</div>""";
         return Results.Content(text, htmlMime);
     }
 });
@@ -212,7 +212,7 @@ app.MapPost("/register", (HttpContext context, [FromForm] string username, [From
 {
     if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
     {
-        var text = $"""<div class="alert alert-danger" role="alert">Please fill all fields</div>""";
+        var text = $"""<div class="alert alert-danger mt-2" role="alert">Please fill all fields</div>""";
         return Results.Content(text,htmlMime);
     }
 
@@ -220,12 +220,12 @@ app.MapPost("/register", (HttpContext context, [FromForm] string username, [From
 
     if (isOk)
     {
-        var text = $"""<div class="alert alert-success loginMessage" role="alert">Registration Successful</div>""";
+        var text = $"""<div class="alert alert-success mt-2 loginMessage" role="alert">Registration Successful</div>""";
         return Results.Content(text,htmlMime);
     }
     else
     {
-        var text = $"""<div class="alert alert-danger loginMessage" role="alert">{ex?.Message ?? "An error occurred while registering the user."}</div>""";
+        var text = $"""<div class="alert alert-danger mt-2 loginMessage" role="alert">{ex?.Message ?? "An error occurred while registering the user."}</div>""";
         return Results.Content(text,htmlMime);
     }
 });
@@ -384,7 +384,7 @@ static string RenderPageAttachmentsForEdit(Page page, AntiforgeryTokenSet antiFo
     HtmlTag CreateEditorHelper(Attachment attachment) =>
       Span.Class("uk-inline")
           .Append(Span.Class("uk-form-icon").Attribute("uk-icon", "icon: copy"))
-          .Append(Input.Text.Value($"[{attachment.FileName}](/attachment?fileId={attachment.FileId})")
+          .Append(Input.Text.Value($"![{attachment.FileName}](/attachment?fileId={attachment.FileId})")
             .Class("uk-input uk-form-small uk-form-width-large")
             .Style("cursor", "pointer")
             .Attribute("onclick", "copyMarkdownLink(this);")
@@ -625,6 +625,22 @@ static string GetRootHTML(string pageName, bool loggedIn, IAntiforgery antiforge
                     document.querySelector('#loginBtn').click();
                     });
             }
+            const login = document.querySelector('#loginBtn')
+            if(login){
+                login.addEventListener('click', function(){
+                    document.querySelector('#errorLog').innerHTML="";
+                    document.querySelector('.loginUsername').value="";
+                    document.querySelector('.loginPwd').value="";
+                });
+            }
+            const register = document.querySelector('#registerBtn')
+            if(register){
+                register.addEventListener('click', function(){
+                    document.querySelector('.error').innerHTML="";
+                    document.querySelector('.registerUsername').value="";
+                    document.querySelector('.registerPwd').value="";
+                });
+            }
         });
         function sleep(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
@@ -669,12 +685,12 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
                                     <input name="{token.FormFieldName}" type="hidden" value="{token.RequestToken}" />
                                     <div class="form-group">
                                         <label for="username">Username:</label>
-                                        <input type="text" required minlength="4" class="form-control mt-2"
+                                        <input type="text" required minlength="4" class="loginUsername form-control mt-2"
                                             id="usernameLogin" placeholder="Enter username" name="username">
                                     </div>
                                     <div class="form-group">
                                         <label for="pwd" class="mt-2">Password:</label>
-                                        <input type="password" required minlength="8" class="form-control mt-2"
+                                        <input type="password" required minlength="8" class="loginPwd form-control mt-2"
                                             id="pwdLogin" placeholder="Enter password" name="password">
                                     </div>
                                     <button type="submit" class="btn btn-primary mt-3">Login</button>
@@ -688,7 +704,7 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
 
                 <!-- Button to Open the Modal -->
                 <button class="uk-button uk-button-primary" data-bs-toggle="modal"
-                    data-bs-target="#registerModal">Register</button>
+                    data-bs-target="#registerModal" id="registerBtn">Register</button>
                 <!-- The Modal -->
                 <div class="modal fade" id="registerModal">
                     <div class="modal-dialog modal-dialog-centered">
@@ -705,12 +721,12 @@ static string GetLoggedOutHTML(IAntiforgery antiforgery, HttpContext context)
                                     <input name="{token.FormFieldName}" type="hidden" value="{token.RequestToken}" />
                                     <div class="form-group">
                                         <label for="username">Username:</label>
-                                        <input type="text" required minlength="4" class="form-control mt-2"
+                                        <input type="text" required minlength="4" class="form-control mt-2 registerUsername"
                                             id="username" name="username" placeholder="Enter username" name="username">
                                     </div>
                                     <div class="form-group">
                                         <label for="pwd" class="mt-2">Password:</label>
-                                        <input type="password" required minlength="8" class="form-control mt-2"
+                                        <input type="password" required minlength="8" class="registerPwd form-control mt-2"
                                             id="pwd" name="password" placeholder="Enter password" name="pswd">
                                     </div>
                                     <button type="submit" class="btn btn-primary mt-3">Register</button>
